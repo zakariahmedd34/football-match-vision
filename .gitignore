@@ -218,3 +218,25 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- football-match-vision: never commit data, weights, caches or outputs ---
+input_videos/*
+!input_videos/.gitkeep
+models/*
+!models/.gitkeep
+stubs/*
+!stubs/.gitkeep
+output_videos/*
+!output_videos/.gitkeep
+results/
+*.pt
+*.pth
+*.onnx
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.pkl
+
+# training runs / predictions
+runs/

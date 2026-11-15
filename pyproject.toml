@@ -1,0 +1,49 @@
+[project]
+name = "football-match-vision"
+version = "0.1.0"
+description = "Football broadcast analysis: YOLO detection, ByteTrack tracking, team assignment, possession analytics, served with FastAPI."
+readme = "README.md"
+authors = [
+    { name = "Zakaria", email = "Zakaria.ahmed@gmail.com" }
+]
+requires-python = "==3.13.*"
+# Versions are pinned to what already exists on this machine (hard-linked, no re-download).
+dependencies = [
+    "torch==2.10.0+cu126",
+    "torchvision==0.25.0+cu126",
+    "ultralytics==8.4.123",
+    "opencv-python==5.0.0.93",
+    "supervision",
+    "numpy==2.5.4",
+    "pandas==3.1.1",
+    "scikit-learn==1.9.1",
+    "scipy==1.18.1",
+    "matplotlib==3.11.2",
+    "pillow==13.0.0",
+    "fastapi==0.163.0",
+    "uvicorn==0.54.0",
+    "python-multipart",
+    "psutil",
+]
+
+[dependency-groups]
+dev = ["pytest", "httpx", "gdown"]
+
+[tool.uv]
+package = false
+# Match transitive versions already on disk so they are reused, not downloaded.
+constraint-dependencies = [
+    "ultralytics-thop==2.1.6",
+    "ultralytics-platform==0.1.8",
+    "polars==1.43.2",
+    "polars-runtime-32==1.43.2",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
