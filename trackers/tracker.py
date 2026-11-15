@@ -158,9 +158,10 @@ class Tracker:
 
             # Draw players
             for track_id, player in player_dict.items():
+                color = player.get("team_color", (0,0,255))  # team color, or red if no team assigned
                 frame = self.draw_ellipse(frame=frame,
                                           bbox=player["bbox"],
-                                          color=(0,0,255),
+                                          color=tuple(int(c) for c in color),  # KMeans gives floats; OpenCV wants ints
                                           track_id=track_id)
             # Draw referees
             for _, referee in referee_dict.items():

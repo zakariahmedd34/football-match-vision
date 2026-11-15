@@ -2,7 +2,9 @@ import os
 import pickle
 import torch
 from tqdm import tqdm
+from team_assigner import TeamAssigner
 from utils.video_utils import read_video, read_video_batch, save_video
+import cv2
 from trackers import Tracker
 import json
 
@@ -19,6 +21,7 @@ def main():
     output_video_path = "output_videos/output.mp4"
     stub_path = "stubs/tracks.pkl"
 
+    # crop = True
     total_frames = 750
     batch_size = 100
     writer = None  # created on the first batch, then reused so each batch is appended
@@ -26,6 +29,7 @@ def main():
     # Tracks for the WHOLE video: all_tracks["players"][frame_num] -> {track_id: {"bbox": [...]}}
     # If a stub exists from a previous run, load it once and skip detection.
     tracker = Tracker(model_path)  # ONE tracker for all batches -> IDs continue across batches
+    team_assigner = TeamAssigner()
     from_stub = os.path.exists(stub_path)
 
     if from_stub:
@@ -44,7 +48,6 @@ def main():
     ) as pbar:
         for start_frame in range(0, total_frames, batch_size):
             frame_batch = read_video_batch(video_path, batch_size=batch_size, start_frame=start_frame)
-            # print(f"Read {len(frame_batch)} frames from {video_path} starting at frame {start_frame}")
 
             if not from_stub:
                 batch_tracks = tracker.get_object_tracks(frame_batch)
@@ -54,16 +57,31 @@ def main():
             # Only this batch's tracks, so index 0 = first frame of this batch (not frame 0 of the video)
             batch_tracks = {key: all_tracks[key][start_frame:start_frame + len(frame_batch)] for key in all_tracks}
 
-            # from pprint import pprint
-            # for category, frames in all_tracks.items():
-            #     print(f"{category}: {len(frames)} frames")
+            # if crop:
+            #     # save cropped image of a player
+            #     for track_id, player in batch_tracks['players'][0].items():
+            #         bbox = player["bbox"]
+            #         frame = frame_batch[0]
+            #         # crop bbox from frame
+            #         cropped_image = frame[int(bbox[1]):int(bbox[3]),int(bbox[0]):int(bbox[2])]
+            #         cv2.imwrite(f'output_videos/cropped_img.jpg',cropped_image) 
+            #         crop = False       
+            #         break
 
-            # pprint(
-            #     {category: frames[0] if frames else {}
-            #     for category, frames in all_tracks.items()},
-            #     sort_dicts=False
-            # )
-            # return
+            # Assign Player Teams: fit the 2 team colors ONCE (first batch), otherwise
+            # KMeans may swap team 1/2 between batches and the colors would flip.
+            if not team_assigner.team_colors:
+                team_assigner.assign_team_color(frame_batch[0],
+                                                batch_tracks['players'][0])
+
+
+            for frame_num, player_track in enumerate(batch_tracks['players']):
+                for player_id, track in player_track.items():
+                    team = team_assigner.get_player_team(frame_batch[frame_num],
+                                                         track['bbox'],
+                                                         player_id)
+                    batch_tracks['players'][frame_num][player_id]['team'] = team
+                    batch_tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
 
             output_video_frames = tracker.draw_annotations(frame_batch, batch_tracks)
             writer = save_video(output_video_frames,
@@ -77,9 +95,6 @@ def main():
                 refresh=False,
             )
             pbar.update(batch_count)
-
-            
-            # print(f"Appended {len(frame_batch)} frames to {output_video_path}")
 
             del frame_batch,output_video_frames, batch_tracks  # free memory after processing each batch
 
