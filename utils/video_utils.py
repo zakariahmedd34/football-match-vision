@@ -1,76 +1,64 @@
-"""Streaming video I/O: frames are read and written one at a time, never all held in memory."""
-
-from collections.abc import Iterator
-from dataclasses import dataclass
-from pathlib import Path
-
 import cv2
-import numpy as np
 
-
-@dataclass
-class VideoInfo:
-    width: int
-    height: int
-    fps: float
-    frame_count: int
-
-
-def get_video_info(video_path: str) -> VideoInfo:
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise IOError(f"Could not open video {video_path}")
-    info = VideoInfo(
-        width=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        height=int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        fps=cap.get(cv2.CAP_PROP_FPS),
-        frame_count=int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
-    )
-    cap.release()
-    return info
-
-
-def read_video(video_path: str) -> Iterator[np.ndarray]:
-    """Yield frames one by one (BGR). Use in a for-loop; only one frame is in memory at a time."""
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise IOError(f"Could not open video {video_path}")
-    try:
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            yield frame
-    finally:
-        cap.release()
-
-
-class VideoWriter:
-    """Write frames one by one. Use as a context manager so the file is always finalized:
-
-        with VideoWriter("out.mp4", info.fps, info.width, info.height) as writer:
-            for frame in read_video("in.mp4"):
-                writer.write(frame)
+def read_video(video_path):
     """
+    Reads a video file and returns a list of frames.
 
-    def __init__(self, output_path: str, fps: float, width: int, height: int):
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        self.size = (width, height)
-        self._out = cv2.VideoWriter(output_path, cv2.VideoWriter.fourcc(*"mp4v"), fps, self.size)
-        if not self._out.isOpened():
-            raise IOError(f"Could not open video writer for {output_path}")
+    Args:
+        video_path (str): Path to the video file.
+"""
+    cap = cv2.VideoCapture(video_path)
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+    return frames
 
-    def write(self, frame: np.ndarray) -> None:
-        h, w = frame.shape[:2]
-        if (w, h) != self.size:
-            raise ValueError(f"Frame size {w}x{h} does not match writer size {self.size[0]}x{self.size[1]}")
-        self._out.write(frame)
+def read_video_batch(video_path, batch_size=20, start_frame=0):
+    """
+    Reads only `batch_size` frames starting at `start_frame` (useful to test on a small sample).
 
-    def close(self) -> None:
-        self._out.release()
+    Args:
+        video_path (str): Path to the video file.
+        batch_size (int): Number of frames to read.
+        start_frame (int): Index of the first frame to read.
+    """
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    frames = []
+    while len(frames) < batch_size:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+    cap.release()
+    return frames
 
-    def __enter__(self):
-        return self
+def save_video(output_video_frame, output_video_path, fps=24, writer=None):
+    """
+    Saves a list of frames as a video file.
 
-    def __exit__(self, *exc):
-        self.close()
+    To write in batches, pass the returned writer back in so frames are appended
+    instead of overwriting the file, then call writer.release() once at the end.
+
+    Args:
+        output_video_frame (list): List of frames to save.
+        output_video_path (str): Path to save the video file.
+        fps (int): Frames per second for the output video.
+        writer: Writer returned by a previous call (None = create a new video file).
+    """
+    if len(output_video_frame) == 0:
+        raise ValueError("No frames to save.")
+
+    if writer is None:
+        height, width = output_video_frame[0].shape[:2]  # numpy frame shape is (height, width, channels)
+        fourcc = cv2.VideoWriter.fourcc(*'mp4v')  # Define the codec for the output video
+        writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            raise IOError(f"Could not open video writer for {output_video_path}")
+
+    for frame in output_video_frame:
+        writer.write(frame)
+    return writer
