@@ -1,16 +1,50 @@
 from ultralytics import YOLO
 import supervision as sv
 import cv2
-from cv2 import ellipse
-import sys
 import numpy as np
+import os
+import sys
+import pandas as pd
 sys.path.append('../')
 from utils import get_center_of_bbox, get_bbox_width
+from utils.logger import log_step
+
+
+def count_tracks(tracks):
+    """Summary of one batch of tracks for the log."""
+    n = len(tracks["players"])
+    player_ids = {pid for frame in tracks["players"] for pid in frame}
+    return {
+        "player_boxes": sum(len(f) for f in tracks["players"]),
+        "unique_player_ids": len(player_ids),
+        "referee_boxes": sum(len(f) for f in tracks["referees"]),
+        "ball_found": f"{sum(1 for f in tracks['ball'] if f)}/{n} frames",
+    }
+
 
 class Tracker:
     def __init__(self, model_path):
-        self.model = YOLO(model_path)
-        self.tracker = sv.ByteTrack()  # Initialize the tracker (keeps its state between calls -> IDs continue across batches)
+        with log_step("Load model", model=os.path.basename(model_path)):
+            self.model = YOLO(model_path)
+            self.tracker = sv.ByteTrack()  # Initialize the tracker (keeps its state between calls -> IDs continue across batches)
+
+    def interpolate_ball_positions(self, ball_positions):
+        with log_step("  Interpolate ball") as out:
+            missing_before = sum(1 for b in ball_positions if 1 not in b)
+
+            ball_positions = [x.get(1,{}).get('bbox',[]) for x in ball_positions]
+            df_ball_positions = pd.DataFrame(ball_positions, columns=['x1','y1','x2','y2'])
+
+            #Interpolate missing values
+            df_ball_positions = df_ball_positions.interpolate()
+            df_ball_positions = df_ball_positions.bfill()
+
+            ball_positions = [{1:{"bbox": x}} for x in df_ball_positions.to_numpy().tolist()]
+
+            out["ball_missing_before"] = f"{missing_before}/{len(ball_positions)}"
+            out["ball_missing_after"] = int(df_ball_positions.isna().any(axis=1).sum())  # NaN = still unknown
+
+        return ball_positions
 
     def detect_frames(self, frames):
         batch_size = 20
@@ -23,58 +57,61 @@ class Tracker:
 
     def get_object_tracks(self, frames):
         """Detect + track one batch of frames. Call it with batches in video order."""
+        with log_step("  Detect + track (YOLO + ByteTrack)", frames=len(frames)) as out:
 
-        detections = self.detect_frames(frames)
+            detections = self.detect_frames(frames)
 
-        tracks = {
+            tracks = {
 
-            "players": [],
-            "referees": [],
-            "ball": []
+                "players": [],
+                "referees": [],
+                "ball": []
 
-        }
-
-
-        for frame_num, detection in enumerate(detections):
-            cls_names = detection.names
-            cls_names_inv = {V:k for k, V in cls_names.items()}
-
-            # convet the detection results to supervision Detections format
-            detection_supervision = sv.Detections.from_ultralytics(detection)
-
-            # convert goalkeeper to a plyaer object
-            for object_index, class_id in enumerate(detection_supervision.class_id):
-                if cls_names[class_id] == 'goalkeeper':
-                    detection_supervision.class_id[object_index] = cls_names_inv['player']
+            }
 
 
-            # Track Objects
+            for frame_num, detection in enumerate(detections):
+                cls_names = detection.names
+                cls_names_inv = {V:k for k, V in cls_names.items()}
 
-            detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
+                # convet the detection results to supervision Detections format
+                detection_supervision = sv.Detections.from_ultralytics(detection)
 
-            tracks["players"].append({})
-            tracks["referees"].append({})
-            tracks["ball"].append({})
+                # convert goalkeeper to a plyaer object
+                for object_index, class_id in enumerate(detection_supervision.class_id):
+                    if cls_names[class_id] == 'goalkeeper':
+                        detection_supervision.class_id[object_index] = cls_names_inv['player']
 
-            for frame_detection in detection_with_tracks:
-                ## extract the bb
-                bbox = frame_detection[0].tolist()  # convert to list
-                cls_id = frame_detection[3]
-                track_id = frame_detection[4]
 
-                if cls_id == cls_names_inv['player']:
-                    tracks["players"][frame_num][track_id] = {'bbox': bbox}
+                # Track Objects
 
-                elif cls_id == cls_names_inv['referee']:
-                    tracks["referees"][frame_num][track_id] = {'bbox': bbox}
+                detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
 
-            for frame_detection in detection_supervision:
-                ## extract the bb
-                bbox = frame_detection[0].tolist()  # convert to list
-                cls_id = frame_detection[3]
+                tracks["players"].append({})
+                tracks["referees"].append({})
+                tracks["ball"].append({})
 
-                if cls_id == cls_names_inv['ball']:
-                    tracks["ball"][frame_num][1] = {'bbox': bbox}
+                for frame_detection in detection_with_tracks:
+                    ## extract the bb
+                    bbox = frame_detection[0].tolist()  # convert to list
+                    cls_id = frame_detection[3]
+                    track_id = frame_detection[4]
+
+                    if cls_id == cls_names_inv['player']:
+                        tracks["players"][frame_num][track_id] = {'bbox': bbox}
+
+                    elif cls_id == cls_names_inv['referee']:
+                        tracks["referees"][frame_num][track_id] = {'bbox': bbox}
+
+                for frame_detection in detection_supervision:
+                    ## extract the bb
+                    bbox = frame_detection[0].tolist()  # convert to list
+                    cls_id = frame_detection[3]
+
+                    if cls_id == cls_names_inv['ball']:
+                        tracks["ball"][frame_num][1] = {'bbox': bbox}
+
+            out.update(count_tracks(tracks))
 
         return tracks
 
@@ -128,7 +165,6 @@ class Tracker:
 
         return frame
 
-
     def draw_triangle(self, frame, bbox, color):
         y = int(bbox[1])
         x, _= get_center_of_bbox(bbox)
@@ -145,37 +181,81 @@ class Tracker:
 
         return frame
 
+    def draw_team_ball_control(self,frame,frame_num, team_ball_control):
+        # Draw a semi transparenct rectangle
+        overlay = frame.copy()
+        cv2.rectangle(
+            overlay,
+            (1359,850),
+            (1900,970),
+            (255,255,255),cv2.FILLED
+        )
+        # alpha -> transparancy 40%
+        alpha = 0.4
+        cv2.addWeighted(overlay,alpha,
+                        frame,1-alpha,0,frame)
+
+        # calculation precentage time
+        team_ball_control_till_frame = team_ball_control[:frame_num+1]
+        #get the number of time each team had ball control
+        team_1_num_frames = team_ball_control_till_frame[team_ball_control_till_frame==1].shape[0]
+        team_2_num_frames = team_ball_control_till_frame[team_ball_control_till_frame==2].shape[0]
+        
+        total = team_1_num_frames + team_2_num_frames
+        team_1 = team_1_num_frames/total if total else 0  # avoid division by zero before anyone had the ball
+        team_2 = team_2_num_frames/total if total else 0
+
+        cv2.putText(frame,
+                    f"Team 1 Ball Control: {team_1*100:.2f}%",
+                    (1400,900),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0,0,0),3)
+        cv2.putText(frame,
+                    f"Team 2 Ball Control: {team_2*100:.2f}%",
+                    (1400,950),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0,0,0),3)
+        return frame
+    def draw_annotations(self,video_frames, tracks,team_ball_control, start_frame=0):
+        # team_ball_control covers the whole video so far -> use VIDEO frame number (start_frame + frame_num)
+        with log_step("  Draw annotations", frames=len(video_frames)) as out:
+            output_video_frames = []
+            for frame_num, frame in enumerate(video_frames):
+                frame = frame.copy()
+
+                player_dict = tracks["players"][frame_num]
+                referee_dict = tracks["referees"][frame_num]
+                ball_dict = tracks["ball"][frame_num]
+
+                # Draw players
+                for track_id, player in player_dict.items():
+                    color = player.get("team_color", (0,0,255))  # team color, or red if no team assigned
+                    frame = self.draw_ellipse(frame=frame,
+                                              bbox=player["bbox"],
+                                              color=tuple(int(c) for c in color),  # KMeans gives floats; OpenCV wants ints
+                                              track_id=track_id)
+                    if player.get('has_ball',False):
+                        frame = self.draw_triangle(frame, player['bbox'],(0,0,255))
+
+                # Draw referees
+                for _, referee in referee_dict.items():
+                    frame = self.draw_ellipse(frame=frame,
+                                                bbox=referee["bbox"],
+                                                color=(0,255,255)
+                                                )
 
 
-    def draw_annotations(self,video_frames, tracks):
-        output_video_frames = []
-        for frame_num, frame in enumerate(video_frames):
-            frame = frame.copy()
+                for _, ball in ball_dict.items():
+                    frame = self.draw_triangle(frame=frame,
+                                               bbox=ball["bbox"],
+                                               color = (0,255,0))
 
-            player_dict = tracks["players"][frame_num]
-            referee_dict = tracks["referees"][frame_num]
-            ball_dict = tracks["ball"][frame_num]
+                # Draw Team Ball Control
+                frame = self.draw_team_ball_control(frame,start_frame + frame_num, team_ball_control)
+                output_video_frames.append(frame)
 
-            # Draw players
-            for track_id, player in player_dict.items():
-                color = player.get("team_color", (0,0,255))  # team color, or red if no team assigned
-                frame = self.draw_ellipse(frame=frame,
-                                          bbox=player["bbox"],
-                                          color=tuple(int(c) for c in color),  # KMeans gives floats; OpenCV wants ints
-                                          track_id=track_id)
-            # Draw referees
-            for _, referee in referee_dict.items():
-                frame = self.draw_ellipse(frame=frame,
-                                            bbox=referee["bbox"],
-                                            color=(0,255,255)
-                                            )
-
-
-            for _, ball in ball_dict.items():
-                frame = self.draw_triangle(frame=frame,
-                                           bbox=ball["bbox"],
-                                           color = (0,255,0))
-
-            output_video_frames.append(frame)
+            out["frames_drawn"] = len(output_video_frames)
 
         return output_video_frames
