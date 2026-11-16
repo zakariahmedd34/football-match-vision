@@ -1,4 +1,7 @@
 from sklearn.cluster import KMeans
+from utils.logger import log_step
+
+
 class TeamAssigner:
     def __init__(self):
         self.team_colors = {}
@@ -32,19 +35,34 @@ class TeamAssigner:
         return player_color
 
     def assign_team_color(self, frame, player_detections):
-        player_colors = []
-        for _, player_detection in player_detections.items():
-            bbox = player_detection["bbox"]
-            player_color = self.get_player_color(frame,bbox)
-            player_colors.append(player_color)
+        with log_step("  Fit team colors (KMeans, once)", players_in_frame=len(player_detections)) as out:
+            player_colors = []
+            for _, player_detection in player_detections.items():
+                bbox = player_detection["bbox"]
+                player_color = self.get_player_color(frame,bbox)
+                player_colors.append(player_color)
 
-        kmeans = KMeans(n_clusters=2,init="k-means++", n_init = 1,random_state=43)
-        kmeans.fit(player_colors)
+            kmeans = KMeans(n_clusters=2,init="k-means++", n_init = 10,random_state=43)
+            kmeans.fit(player_colors)
 
-        self.kmeans = kmeans
+            self.kmeans = kmeans
 
-        self.team_colors[1] = kmeans.cluster_centers_[0]
-        self.team_colors[2] = kmeans.cluster_centers_[1]
+            self.team_colors[1] = kmeans.cluster_centers_[0]
+            self.team_colors[2] = kmeans.cluster_centers_[1]
+
+            out["team_colors"] = {t: tuple(int(c) for c in col) for t, col in self.team_colors.items()}
+
+    def assign_teams(self, frames, player_tracks):
+        """Add 'team' and 'team_color' to every player box of a batch (changes player_tracks in place)."""
+        with log_step("  Assign teams") as out:
+            team_counts = {}
+            for frame_num, player_track in enumerate(player_tracks):
+                for player_id, track in player_track.items():
+                    team = self.get_player_team(frames[frame_num], track['bbox'], player_id)
+                    track['team'] = team
+                    track['team_color'] = self.team_colors[team]
+                    team_counts[int(team)] = team_counts.get(int(team), 0) + 1
+            out["player_boxes_per_team"] = team_counts
 
     def get_player_team(self, frame, player_bbox,player_id):
         if player_id in self.player_team_dict:
